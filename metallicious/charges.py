@@ -1,35 +1,48 @@
 import argparse
-from subprocess import Popen, PIPE
-import numpy as np
 import os
 import shutil
+from subprocess import PIPE, Popen
+
+import MDAnalysis
+import numpy as np
+
 from metallicious.log import logger
 from metallicious.utils import new_directory
-import MDAnalysis
 
 
 def connectivity_for_qcel(filename, metal_name):
-    '''
+    """
     Returns connectivity between atoms required by qcel
 
     :param filename: (str) filename with coorinates
     :param metal_name: (str) name of metal
     :return: (list(list(int,int))) list of pairs indicating connected atoms
-    '''
+    """
 
     atoms = MDAnalysis.Universe(filename).atoms
     if metal_name is not None:
         types = atoms.types
         types[0] = metal_name
         atoms.types = types
-    bonds = MDAnalysis.topology.guessers.guess_bonds(atoms, atoms.positions, vdwradii={metal_name: 0.1})
+    bonds = MDAnalysis.topology.guessers.guess_bonds(
+        atoms, atoms.positions, vdwradii={metal_name: 0.1}
+    )
     new_bonds = [(bond[0], bond[1], 1) for bond in bonds]
     return new_bonds
 
 
-def resp_orca(filename, charge=0, opt=True, metal_name=None, metal_radius=None, n_reorientations=1, mult=1,
-              extra_atoms=None, keywords = ['D3BJ', 'PBE0', 'def2-SVP', 'keepdens']):
-    '''
+def resp_orca(
+    filename,
+    charge=0,
+    opt=True,
+    metal_name=None,
+    metal_radius=None,
+    n_reorientations=1,
+    mult=1,
+    extra_atoms=None,
+    keywords=["D3BJ", "PBE0", "def2-SVP", "keepdens"],
+):
+    """
     Single point calculations of ESP and RESP analysis using autode/ORCA and psiresp
     This part of the script overwrites parts of the functionality of autode
 
@@ -43,22 +56,26 @@ def resp_orca(filename, charge=0, opt=True, metal_name=None, metal_radius=None, 
     :param extra_atoms: (list(int)) group of atoms which will be constrained to charge zero
     :param keywords: (list(str)) keywords for the autode
     :return:
-    '''
+    """
 
     import autode as ade
-    from autode.wrappers.ORCA import work_in_tmp_dir, logger
     import psiresp
     import qcelemental as qcel
+    from autode.wrappers.ORCA import logger, work_in_tmp_dir
 
     # Below functions are to overwrite for some of the autode functionality
     # in particular we want to save the ESP files, densities etc.
     def old_execute(self, calc):
-        @work_in_tmp_dir(filenames_to_copy=calc.input.filenames,
-                         kept_file_exts=('.out', '.hess', '.xyz', '.inp', '.pc'))
+        @work_in_tmp_dir(
+            filenames_to_copy=calc.input.filenames,
+            kept_file_exts=(".out", ".hess", ".xyz", ".inp", ".pc"),
+        )
         def execute_orca():
             # Run the calculations
-            run_external(params=[calc.method.path, calc.input.filename],
-                         output_filename=calc.output.filename)
+            run_external(
+                params=[calc.method.path, calc.input.filename],
+                output_filename=calc.output.filename,
+            )
 
         execute_orca()
         return None
@@ -76,13 +93,13 @@ def resp_orca(filename, charge=0, opt=True, metal_name=None, metal_radius=None, 
             params (list(str)): e.g. [/path/to/method, input-filename]
         """
 
-        with open(output_filename, 'w') as output_file:
+        with open(output_filename, "w") as output_file:
             # /path/to/method input_filename > output_filename
             process = Popen(params, stdout=output_file, stderr=PIPE, close_fds=True)
 
             with process.stderr:
-                for line in iter(process.stderr.readline, b''):
-                    logger.warning('STDERR: %r', line.decode())
+                for line in iter(process.stderr.readline, b""):
+                    logger.warning("STDERR: %r", line.decode())
                     print(line.decode())
 
             poll = process.poll()
@@ -96,27 +113,53 @@ def resp_orca(filename, charge=0, opt=True, metal_name=None, metal_radius=None, 
         return None
 
     def new_execute(self, calc):
-        @work_in_tmp_dir(filenames_to_copy=calc.input.filenames + ["grid.vpot.xyz"],
-                         kept_file_exts=('.out', '.hess', '.xyz', '.inp', '.pc', '.input', '.densities', '.gbw'))
+        @work_in_tmp_dir(
+            filenames_to_copy=calc.input.filenames + ["grid.vpot.xyz"],
+            kept_file_exts=(
+                ".out",
+                ".hess",
+                ".xyz",
+                ".inp",
+                ".pc",
+                ".input",
+                ".densities",
+                ".gbw",
+            ),
+        )
         def execute_orca():
             # Run the calculations
-            run_external(params=[calc.method.path, calc.input.filename],
-                         output_filename=calc.output.filename)
+            run_external(
+                params=[calc.method.path, calc.input.filename],
+                output_filename=calc.output.filename,
+            )
             # orca_vpot filename.gbw filename.scfp filename.vpot.xyz filename.vpot.out
             filename_core = calc.input.filename.replace(".inp", "")
             run_external(
-                params=[calc.method.path + "_vpot", filename_core + ".gbw", filename_core + ".scfp", "grid.vpot.xyz",
-                        filename_core + ".vpot.out"],
-                output_filename=filename_core + "_vpot.out")
+                params=[
+                    calc.method.path + "_vpot",
+                    filename_core + ".gbw",
+                    filename_core + ".scfp",
+                    "grid.vpot.xyz",
+                    filename_core + ".vpot.out",
+                ],
+                output_filename=filename_core + "_vpot.out",
+            )
+
         execute_orca()
         return None
 
     method = ade.methods.ORCA()
     if method.is_available is False:
-        raise NameError("For parametrization of templates, QM software ORCA is required")
+        raise NameError(
+            "For parametrization of templates, QM software ORCA is required"
+        )
 
     site = ade.Molecule(filename, charge=charge, mult=mult)
-    molecule_qcel = qcel.models.Molecule.from_file(filename, molecular_charge=charge, connectivity=connectivity_for_qcel(filename, metal_name))
+    molecule_qcel = qcel.models.Molecule.from_file(
+        filename,
+        molecular_charge=charge,
+        connectivity=connectivity_for_qcel(filename, metal_name),
+    )
     molecule_psiresp = psiresp.Molecule(qcmol=molecule_qcel, charge=charge)
     logger.info(f"Formal charge of the molecule for template calculations: {charge:}")
     here = os.getcwd()
@@ -168,15 +211,14 @@ def resp_orca(filename, charge=0, opt=True, metal_name=None, metal_radius=None, 
         site.coordinates = orient.coordinates
         site.name = name + "_orient" + str(orient_idx)
 
-        #method_keywords = ['B3LYP', '6-31G*', 'keepdens']
-        #if metal_name is not None:
+        # method_keywords = ['B3LYP', '6-31G*', 'keepdens']
+        # if metal_name is not None:
         #    if name_to_atomic_number[metal_name] > 30:
-
 
         site.single_point(method=method, keywords=keywords)
 
         # load esp from the file
-        esp_name = site.name + '_sp_' + method.name + '.vpot.out'
+        esp_name = site.name + "_sp_" + method.name + ".vpot.out"
         esp = np.loadtxt(esp_name, skiprows=1).T[3]
 
         # add esp and grid to the specific orientation
@@ -185,10 +227,16 @@ def resp_orca(filename, charge=0, opt=True, metal_name=None, metal_radius=None, 
 
     constraints = psiresp.ChargeConstraintOptions()
     if extra_atoms is not None:
-        constrained_atoms = [index for index, _ in enumerate(site.atoms) if index in extra_atoms]
+        constrained_atoms = [
+            index for index, _ in enumerate(site.atoms) if index in extra_atoms
+        ]
 
-        logger.info(f"Constraining atoms {constrained_atoms:} Symbols: {[molecule_psiresp.atoms[a].symbol for a in constrained_atoms]:}")
-        constraints.add_charge_sum_constraint_for_molecule(molecule_psiresp, charge=0, indices=constrained_atoms)
+        logger.info(
+            f"Constraining atoms {constrained_atoms:} Symbols: {[molecule_psiresp.atoms[a].symbol for a in constrained_atoms]:}"
+        )
+        constraints.add_charge_sum_constraint_for_molecule(
+            molecule_psiresp, charge=0, indices=constrained_atoms
+        )
         logger.info(f"Constrains: {constraints.charge_sum_constraints:}")
 
     # run psiRESP to find the charges
@@ -196,13 +244,16 @@ def resp_orca(filename, charge=0, opt=True, metal_name=None, metal_radius=None, 
     normal_charges = job.compute_charges()
 
     resp_charges = normal_charges[0]
-    logger.info(f"RESP before making extra atoms zero: {resp_charges:} Sum: {np.sum(resp_charges)}")
+    logger.info(
+        f"RESP before making extra atoms zero: {resp_charges:} Sum: {np.sum(resp_charges)}"
+    )
 
     # for some reason there is small charge left on residues
     # we calculate mean of all, but not constrained atoms (we will set up them to zero)
     if extra_atoms is not None:
-        mean_left_charge = (charge - np.sum(resp_charges) + np.sum(resp_charges[constrained_atoms])) / float(
-            len(resp_charges) - len(constrained_atoms))
+        mean_left_charge = (
+            charge - np.sum(resp_charges) + np.sum(resp_charges[constrained_atoms])
+        ) / float(len(resp_charges) - len(constrained_atoms))
     else:
         mean_left_charge = (charge - np.sum(resp_charges)) / float(len(resp_charges))
     resp_charges += mean_left_charge
@@ -218,8 +269,11 @@ def resp_orca(filename, charge=0, opt=True, metal_name=None, metal_radius=None, 
     os.chdir(here)
     return resp_charges
 
-def calcualte_diffrence_and_symmetrize(metal_charge, unique_ligands_pattern, site_charges, ligand_charges):
-    '''
+
+def calcualte_diffrence_and_symmetrize(
+    metal_charge, unique_ligands_pattern, site_charges, ligand_charges
+):
+    """
     Calculates residual charges by subtracting charges of separate residues from the whole structure.
     Firstly the charges are symmetrized over the different ligands
 
@@ -228,19 +282,27 @@ def calcualte_diffrence_and_symmetrize(metal_charge, unique_ligands_pattern, sit
     :param site_charges: (list(float)) partial charges of the whole site
     :param ligand_charges: (list(float)) partial charges of separated ligands
     :return: (list(float)) list of partial charges
-    '''
-    logger.info(f"calcualte_diffrence() arguments: {metal_charge:}, {unique_ligands_pattern:}, {site_charges:}, {ligand_charges:}")
+    """
+    logger.info(
+        f"calcualte_diffrence() arguments: {metal_charge:}, {unique_ligands_pattern:}, {site_charges:}, {ligand_charges:}"
+    )
     # unconcatanatet to the split charges:
     n_lingads = [len(temp) for temp in ligand_charges]
 
     # number of atoms site
     site_atoms = [n_lingads[a] for a in unique_ligands_pattern]
     site_atoms = [1] + site_atoms
-    split_site_charges = [np.array(site_charges[sum(site_atoms[:a]):sum(site_atoms[:a + 1])]) for a in
-                          range(len(site_atoms))]
-    logger.info(f"Charges of the whole site: {np.sum(np.concatenate(split_site_charges)):}")
+    split_site_charges = [
+        np.array(site_charges[sum(site_atoms[:a]) : sum(site_atoms[: a + 1])])
+        for a in range(len(site_atoms))
+    ]
+    logger.info(
+        f"Charges of the whole site: {np.sum(np.concatenate(split_site_charges)):}"
+    )
 
-    logger.info(f"Changing metal charge from {metal_charge} to {split_site_charges[0][0]}")
+    logger.info(
+        f"Changing metal charge from {metal_charge} to {split_site_charges[0][0]}"
+    )
     split_site_charges[0][0] = split_site_charges[0][0] - metal_charge
 
     # we group the ligands and calculate mean value of charges
@@ -248,7 +310,9 @@ def calcualte_diffrence_and_symmetrize(metal_charge, unique_ligands_pattern, sit
         find = [c + 1 for c, b in enumerate(unique_ligands_pattern) if b == a]
         # +1 becasue of metal
 
-        mean_split = np.mean(np.array([split_site_charges[idx] for idx in find]), axis=0)
+        mean_split = np.mean(
+            np.array([split_site_charges[idx] for idx in find]), axis=0
+        )
         logger.info(f"Mean charge of unique ligands from whole site: {mean_split:}")
         for d in find:
             split_site_charges[d] = mean_split - ligand_charges[a]
@@ -261,9 +325,19 @@ def calcualte_diffrence_and_symmetrize(metal_charge, unique_ligands_pattern, sit
     return new_charges
 
 
-def calculate_charges2(metal_name, metal_charge, filename, unique_ligands_pattern, ligand_charges_pattern, link_atoms,
-                       additional_atoms, starting_index, metal_radius, mult=1):
-    '''
+def calculate_charges2(
+    metal_name,
+    metal_charge,
+    filename,
+    unique_ligands_pattern,
+    ligand_charges_pattern,
+    link_atoms,
+    additional_atoms,
+    starting_index,
+    metal_radius,
+    mult=1,
+):
+    """
     Procedure of calculating residual partial charges for the metal sites. This function implicitly assumes that we are
     in folder "site_{metal_name}{side_idx}" and files saturated_template.xyz and ligand_{idx}.xyz exists.
     It runs RESP calculation for the metal sites and its separated components and calcualtes their diffrence.
@@ -280,11 +354,11 @@ def calculate_charges2(metal_name, metal_charge, filename, unique_ligands_patter
     :param metal_radius: (float) VdW radius of the metal
     :param mult: (int) multiplicity of the metal (it is assumed that this is multiplicity of the system)
     :return: list(float) list of residual partial charges
-    '''
+    """
 
     if not os.path.isfile("saturated_template.xyz"):
         raise ValueError("There is no saturated_template.xyz file")
-    for lig_idx in list(set(unique_ligands_pattern)) :
+    for lig_idx in list(set(unique_ligands_pattern)):
         if not os.path.isfile(f"ligand_{lig_idx:d}.xyz"):
             raise ValueError(f"There is no ligand_{lig_idx:d}.xyz file")
 
@@ -298,42 +372,72 @@ def calculate_charges2(metal_name, metal_charge, filename, unique_ligands_patter
         for idx, _ in enumerate(starting_index[:-1]):
             if starting_index[idx] < extra_atom < starting_index[idx + 1]:
                 unique_ligands_constraints[unique_ligands_pattern[idx - 1]].append(
-                    extra_atom - starting_index[idx])
+                    extra_atom - starting_index[idx]
+                )
 
     for idx, _ in enumerate(unique_ligands_constraints):
         unique_ligands_constraints[idx] = list(set(unique_ligands_constraints[idx]))
 
     ligand_charges = []
     for lig_idx in list(set(unique_ligands_pattern)):
-        ligand_formal_charge = ligand_charges_pattern[list(unique_ligands_pattern).index(lig_idx)]
-        charges = resp_orca(f"ligand_{lig_idx:d}.xyz", charge=ligand_formal_charge, opt=False, metal_name=None,
-                            metal_radius=metal_radius, extra_atoms=unique_ligands_constraints[lig_idx])
+        ligand_formal_charge = ligand_charges_pattern[
+            list(unique_ligands_pattern).index(lig_idx)
+        ]
+        charges = resp_orca(
+            f"ligand_{lig_idx:d}.xyz",
+            charge=ligand_formal_charge,
+            opt=False,
+            metal_name=None,
+            metal_radius=metal_radius,
+            extra_atoms=unique_ligands_constraints[lig_idx],
+        )
         ligand_charges.append(charges)
 
-    site_charges = resp_orca('saturated_template.xyz', charge=metal_charge + np.sum(ligand_charges_pattern), opt=False,
-                             metal_name=metal_name, metal_radius=metal_radius, mult=mult, extra_atoms=extra_atoms)
+    site_charges = resp_orca(
+        "saturated_template.xyz",
+        charge=metal_charge + np.sum(ligand_charges_pattern),
+        opt=False,
+        metal_name=metal_name,
+        metal_radius=metal_radius,
+        mult=mult,
+        extra_atoms=extra_atoms,
+    )
 
     logger.debug(f"ligand charges: {len(ligand_charges):}, {ligand_charges:}")
     logger.debug(f"site charges: {len(site_charges):}, {site_charges:}")
 
-    new_site_charges = calcualte_diffrence_and_symmetrize(metal_charge, unique_ligands_pattern, site_charges,
-                                                          ligand_charges)
+    new_site_charges = calcualte_diffrence_and_symmetrize(
+        metal_charge, unique_ligands_pattern, site_charges, ligand_charges
+    )
 
-    logger.debug(f"Site charges after symmetrization: {len(new_site_charges):}, {new_site_charges:}")
+    logger.debug(
+        f"Site charges after symmetrization: {len(new_site_charges):}, {new_site_charges:}"
+    )
 
     return new_site_charges
 
+
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-f", help="Metaloorganic structre (*gro, *pdb, etc. all supported by MDAnalysis)")
+    parser.add_argument(
+        "-f",
+        help="Metaloorganic structre (*gro, *pdb, etc. all supported by MDAnalysis)",
+    )
     parser.add_argument("-charge", help="Charge")
     parser.add_argument("-metal_name", help="Name of the metal")
-    parser.add_argument("-vdw_data_name", default='uff', help="vdw_data_name")
+    parser.add_argument("-vdw_data_name", default="uff", help="vdw_data_name")
     parser.add_argument("-mult", default=1, help="multiplicity")
     return parser.parse_args()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     args = get_args()
     # if args.o is not None:
-    charges = resp_orca(args.f, charge=args.charge, metal_name=args.metal_name, metal_radius=args.metal_radius, mult=args.mult, extra_atoms=args.extra_atoms)
+    charges = resp_orca(
+        args.f,
+        charge=args.charge,
+        metal_name=args.metal_name,
+        metal_radius=args.metal_radius,
+        mult=args.mult,
+        extra_atoms=args.extra_atoms,
+    )

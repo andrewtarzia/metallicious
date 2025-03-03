@@ -1,11 +1,10 @@
-import parmed as pmd
 import os
 
+import parmed as pmd
+
 # try:
-from metallicious.data import name2mass
-from metallicious.data import name_to_atomic_number
-from metallicious.data import vdw_data
-from metallicious.antechamber_interface import antechamber
+from metallicious.data import name2mass, name_to_atomic_number, vdw_data
+
 # except:
 #     from data import name2mass
 #     from data import name_to_atomic_number
@@ -14,14 +13,14 @@ from metallicious.antechamber_interface import antechamber
 
 
 def create_metal_topol(metal_name, metal_charge, vdw_data_name):
-    '''
+    """
     Creates force-field parameters of the metal, reading from library of available L-J parameters
 
     :param metal_name: (string) name of the metal
     :param metal_charge: (int) charge of the metal
     :param vdw_data_name: (string) name of the library from which take the L-J parameters
     :return: (parmed.topologyobject) topology
-    '''
+    """
     data = vdw_data[vdw_data_name]
 
     if f"{metal_name.title():}{metal_charge:}" in data:
@@ -29,7 +28,9 @@ def create_metal_topol(metal_name, metal_charge, vdw_data_name):
     elif metal_name in data:
         name = metal_name
     else:
-        raise Exception(f"Metal {metal_name.title():}{metal_charge:} not in the library")
+        raise Exception(
+            f"Metal {metal_name.title():}{metal_charge:} not in the library"
+        )
 
     if name in data:
         eps = data[name][0]
@@ -38,8 +39,16 @@ def create_metal_topol(metal_name, metal_charge, vdw_data_name):
         mass = name2mass[metal_name]
         atomic_number = name_to_atomic_number[metal_name]
 
-        new_atom = pmd.topologyobjects.Atom(atomic_number=atomic_number, type=metal_name, name=metal_name,
-                                            rmin=radius, epsilon=eps, mass=mass, charge=metal_charge, number=0)
+        new_atom = pmd.topologyobjects.Atom(
+            atomic_number=atomic_number,
+            type=metal_name,
+            name=metal_name,
+            rmin=radius,
+            epsilon=eps,
+            mass=mass,
+            charge=metal_charge,
+            number=0,
+        )
 
         struct = pmd.structure.Structure()
         struct.add_atom(new_atom, metal_name, metal_name)
@@ -52,8 +61,7 @@ def create_metal_topol(metal_name, metal_charge, vdw_data_name):
 
         os.remove(f"{name:s}.top")
 
-
-        ''' I have several attemps how to make it without file but did not manage to figure out:
+        """ I have several attemps how to make it without file but did not manage to figure out:
         metal_topol = pmd.gromacs.GromacsTopologyFile()
         metal_topol.add_atom(new_atom, metal_name, metal_name)
         #atomtype = pmd.topologyobjects.AtomType("Pd", None, 106)
@@ -63,8 +71,6 @@ def create_metal_topol(metal_name, metal_charge, vdw_data_name):
         residue_list = pmd.topologyobjects.ResidueList()
         residue_list.append(residue)
         metal_topol.residues = residue_list
-        '''
+        """
 
         return metal_topol
-
-

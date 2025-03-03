@@ -1,60 +1,64 @@
-import os
-
-import networkx as nx
-import MDAnalysis
 from itertools import permutations
-from MDAnalysis.analysis import align
+
+import MDAnalysis
+import MDAnalysis.transformations
+import networkx as nx
+import numpy as np
 from MDAnalysis.analysis.rms import rmsd
 from networkx.algorithms import isomorphism
-import numpy as np
-import re
 
-import MDAnalysis.transformations
-
-
-#try:
+# try:
 from metallicious.log import logger
 from metallicious.utils import strip_numbers_from_atom_name
+
 # except:
 #     from log import logger
 
 
 def syst_to_graph(atoms, vdwradii):
-    '''
+    """
     Transforms MDAnalysis.Universe.atoms to the Graph (edges are bonds)
 
     :param atoms: (MDAnalysis.Universe.atoms) input coordination file
     :param vdwradii: (dict) dictionary of names and charges
     :return: (NetworkX.Graph) Graph where edges are bonds
-    '''
+    """
     bonds = MDAnalysis.topology.guessers.guess_bonds(atoms, atoms.positions)
     G_fingerprint = nx.Graph()
     if len(bonds) > 0:  # fingerprint with ligands larger than one atom
         G_fingerprint = nx.Graph(bonds, vdwradii=vdwradii)
-    elif len(bonds) == 0:  # not bonds, this has to be minimal fingerprint, only donor atoms
+    elif (
+        len(bonds) == 0
+    ):  # not bonds, this has to be minimal fingerprint, only donor atoms
         G_fingerprint.add_nodes_from(atoms.indices)
 
-    nx.set_node_attributes(G_fingerprint, {atom.index: atom.name[0] for atom in atoms.atoms}, "name")
+    nx.set_node_attributes(
+        G_fingerprint, {atom.index: atom.name[0] for atom in atoms.atoms}, "name"
+    )
     return G_fingerprint
 
 
 def unwrap(syst, metal_type, metal_cutoff=3):
-    '''
+    """
     Adds to MDAnalysis.Universe bonds which are through periodic boundary conditions
 
     :param syst: (MDAnalysis.Universe) input coordinates
     :param metal_type: (str) metal element
     :param metal_cutoff: (float) cut-off for metal-ligand bond
     :return: (MDAnalysis.Universe.atoms)
-    '''
+    """
     new_universe = syst.universe.copy()
 
-    G_cage = nx.Graph(MDAnalysis.topology.guessers.guess_bonds(syst.atoms,
-                                                               syst.atoms.positions,
-                                                               vdwradii={metal_type: metal_cutoff},
-                                                               box=new_universe.dimensions))
+    G_cage = nx.Graph(
+        MDAnalysis.topology.guessers.guess_bonds(
+            syst.atoms,
+            syst.atoms.positions,
+            vdwradii={metal_type: metal_cutoff},
+            box=new_universe.dimensions,
+        )
+    )
     bonds = list(G_cage.edges)
-    new_universe.add_TopologyAttr('bonds', bonds)
+    new_universe.add_TopologyAttr("bonds", bonds)
     new_syst = new_universe.atoms[syst.atoms.indices]
 
     transform = MDAnalysis.transformations.unwrap(new_syst)
@@ -62,17 +66,18 @@ def unwrap(syst, metal_type, metal_cutoff=3):
 
     return new_syst
 
+
 def int_list_to_str(lista):
-    '''
+    """
     Transforms list of integers to string (e.g., [1,2,3] -> "1 2 3")
     :param lista: (list(int)) list of integers
     :return: (str) string
-    '''
+    """
     return " ".join(list(map(str, lista)))
 
 
 def map_two_structures(metal_index, connected_cut_system, syst_fingerprint, metal_name):
-    '''
+    """
     Compares two structures (connected_cut_system and syst_fingerprint) and tries to find the equivalent atoms in each.
     The equivalent atoms are storred as dictionary (e.g.,{1:2,2:1,3:3}), which shows the index of equivalent atoms in
     the other structure. Mapping is necessary to copy template to the input structure
@@ -81,35 +86,48 @@ def map_two_structures(metal_index, connected_cut_system, syst_fingerprint, meta
     :param connected_cut_system: (MDAnalysis.Universe.atoms) input structure 1,for which mapping will be found
     :param syst_fingerprint:(MDAnalysis.Universe.atoms) input structure 2, which is reference
     :param metal_name: (str) metal name
-    :return: (dict, int): the mapping, and the RMSD of syst_fingerprint and reordered (mapped) connected_cut_system  
-    '''
+    :return: (dict, int): the mapping, and the RMSD of syst_fingerprint and reordered (mapped) connected_cut_system
+    """
     # usually fingerprint suppose to not have the PBC, but for standrazing purposes we unwrap it:
     syst_fingerprint_pbc = syst_fingerprint
     if syst_fingerprint.universe.dimensions is not None:
         syst_fingerprint_pbc = unwrap(syst_fingerprint, syst_fingerprint[0].type)
 
     # select_atoms automatically tries to sort things, but we assume that metal is first
-    syst_fingerprint_heavy_atoms = syst_fingerprint_pbc.select_atoms(f"not name H*", sorted=False)
+    syst_fingerprint_heavy_atoms = syst_fingerprint_pbc.select_atoms(
+        "not name H*", sorted=False
+    )
 
-    G_fingerprint_heavy_atoms = syst_to_graph(syst_fingerprint_heavy_atoms.atoms[1:], vdwradii={metal_name: 1.0})
+    G_fingerprint_heavy_atoms = syst_to_graph(
+        syst_fingerprint_heavy_atoms.atoms[1:], vdwradii={metal_name: 1.0}
+    )
 
-    G_fingerprint_subs_heavy_atoms = [G_fingerprint_heavy_atoms.subgraph(a) for a in
-                                      nx.connected_components(G_fingerprint_heavy_atoms)]
+    G_fingerprint_subs_heavy_atoms = [
+        G_fingerprint_heavy_atoms.subgraph(a)
+        for a in nx.connected_components(G_fingerprint_heavy_atoms)
+    ]
 
     connected_cut_system_pbc = connected_cut_system
     if connected_cut_system.universe.dimensions is not None:
-        connected_cut_system_pbc = unwrap(connected_cut_system, connected_cut_system[0].type)
+        connected_cut_system_pbc = unwrap(
+            connected_cut_system, connected_cut_system[0].type
+        )
 
-    connected_cut_system_pbc_heavy_atoms = connected_cut_system_pbc.select_atoms("not name H*", sorted=False)
+    connected_cut_system_pbc_heavy_atoms = connected_cut_system_pbc.select_atoms(
+        "not name H*", sorted=False
+    )
 
     no_metal_heavy_atoms = connected_cut_system_pbc_heavy_atoms[1:]
-    
+
     G_site_heavy_atoms = syst_to_graph(no_metal_heavy_atoms, vdwradii={metal_name: 1.0})
 
     # G_site_heavy_atoms = nx.Graph(
     #    MDAnalysis.topology.guessers.guess_bonds(no_metal_heavy_atoms.atoms, no_metal_heavy_atoms.atoms.positions))
     # nx.set_node_attributes(G_site_heavy_atoms, {atom.index: atom.name[0] for atom in no_metal_heavy_atoms.atoms}, "name")
-    G_site_subs_heavy_atoms = [G_site_heavy_atoms.subgraph(a) for a in nx.connected_components(G_site_heavy_atoms)]
+    G_site_subs_heavy_atoms = [
+        G_site_heavy_atoms.subgraph(a)
+        for a in nx.connected_components(G_site_heavy_atoms)
+    ]
 
     number_ligands_bound = len(G_site_subs_heavy_atoms)
 
@@ -130,16 +148,25 @@ def map_two_structures(metal_index, connected_cut_system, syst_fingerprint, meta
 
         # we check all permutation of atom numbers in residues
         for lig_a, lig_b in enumerate(perm):
-
             # if length of ligands is different, then this is definitely wrong permutation
-            if len(G_fingerprint_subs_heavy_atoms[lig_a]) != len(G_site_subs_heavy_atoms[lig_b]):
+            if len(G_fingerprint_subs_heavy_atoms[lig_a]) != len(
+                G_site_subs_heavy_atoms[lig_b]
+            ):
                 mappings = []
                 length_match = False
                 break
 
-            iso = isomorphism.GraphMatcher(G_fingerprint_subs_heavy_atoms[lig_a], G_site_subs_heavy_atoms[lig_b],
-                                           node_match=lambda n1, n2: n1['name'] == n2['name'])
-            mappings.append([subgraph_mapping for subgraph_mapping in iso.subgraph_isomorphisms_iter()])
+            iso = isomorphism.GraphMatcher(
+                G_fingerprint_subs_heavy_atoms[lig_a],
+                G_site_subs_heavy_atoms[lig_b],
+                node_match=lambda n1, n2: n1["name"] == n2["name"],
+            )
+            mappings.append(
+                [
+                    subgraph_mapping
+                    for subgraph_mapping in iso.subgraph_isomorphisms_iter()
+                ]
+            )
 
         if length_match:
             # we tabulate all the permutations (of residues) of permutations (of atoms)
@@ -155,8 +182,8 @@ def map_two_structures(metal_index, connected_cut_system, syst_fingerprint, meta
                         recursive(mapping, index + 1, copy)
 
             recursive(mappings, 0, [])
-            #logger.info(f"Permutations to check:{len(all_possible_mappings):}")
-        
+            # logger.info(f"Permutations to check:{len(all_possible_mappings):}")
+
             for mapping_idx, _ in enumerate(all_possible_mappings):
                 # concatenate the mapping into one dictionary
                 concatenated_mapping = {}
@@ -169,7 +196,12 @@ def map_two_structures(metal_index, connected_cut_system, syst_fingerprint, meta
                     reversed_concatenated_mapping[d] = concatenated_mapping[d]
 
                 reordered_system = connected_cut_system_pbc_heavy_atoms.atoms[
-                    [0] + [indecies2number[value] for value in reversed_concatenated_mapping.values()]]  # Find where metal is
+                    [0]
+                    + [
+                        indecies2number[value]
+                        for value in reversed_concatenated_mapping.values()
+                    ]
+                ]  # Find where metal is
                 # make sure that the type is preseved (esptially challening with names starting with C and N)
                 reordered_system.atoms[0].type = metal_name
                 reordered_system.atoms[0].mass = 0.0
@@ -177,16 +209,35 @@ def map_two_structures(metal_index, connected_cut_system, syst_fingerprint, meta
                 # MDAnalysis has sometimes problems with masses, it give carbon mass of calcium
                 # this code makes sure that the masses are correct:
 
-
                 for atom, _ in enumerate(syst_fingerprint_heavy_atoms.atoms):
-                    if np.abs(syst_fingerprint_heavy_atoms.atoms[atom].mass - reordered_system.atoms[atom].mass) > 1:
-                        if (strip_numbers_from_atom_name(
-                                syst_fingerprint_heavy_atoms.atoms[atom].name) == strip_numbers_from_atom_name(
-                            reordered_system.atoms[atom].name)):
-                            syst_fingerprint_heavy_atoms.atoms[atom].mass = reordered_system.atoms[atom].mass
+                    if (
+                        np.abs(
+                            syst_fingerprint_heavy_atoms.atoms[atom].mass
+                            - reordered_system.atoms[atom].mass
+                        )
+                        > 1
+                    ):
+                        if strip_numbers_from_atom_name(
+                            syst_fingerprint_heavy_atoms.atoms[atom].name
+                        ) == strip_numbers_from_atom_name(
+                            reordered_system.atoms[atom].name
+                        ):
+                            syst_fingerprint_heavy_atoms.atoms[
+                                atom
+                            ].mass = reordered_system.atoms[atom].mass
 
-                if np.linalg.norm(syst_fingerprint_heavy_atoms.positions - reordered_system.positions)>0.01:
-                    rmsd_fp = rmsd(syst_fingerprint_heavy_atoms.positions, reordered_system.positions, superposition = True)
+                if (
+                    np.linalg.norm(
+                        syst_fingerprint_heavy_atoms.positions
+                        - reordered_system.positions
+                    )
+                    > 0.01
+                ):
+                    rmsd_fp = rmsd(
+                        syst_fingerprint_heavy_atoms.positions,
+                        reordered_system.positions,
+                        superposition=True,
+                    )
                 else:
                     rmsd_fp = 0.0
 
@@ -195,38 +246,63 @@ def map_two_structures(metal_index, connected_cut_system, syst_fingerprint, meta
                     best_rmsd = rmsd_fp
                     best_mapping = reversed_concatenated_mapping
 
-                if best_rmsd < 0.01:  # if rmsd_fp is small there is no point of searching further
+                if (
+                    best_rmsd < 0.01
+                ):  # if rmsd_fp is small there is no point of searching further
                     break
 
     if best_mapping is None:
         return best_mapping, best_rmsd
 
-    upper_names = np.array([strip_numbers_from_atom_name(name).upper() for name in syst_fingerprint_heavy_atoms.atoms.names])
+    upper_names = np.array(
+        [
+            strip_numbers_from_atom_name(name).upper()
+            for name in syst_fingerprint_heavy_atoms.atoms.names
+        ]
+    )
     temp = np.where([upper_names == metal_name.upper()])[0]
 
     # Reconstruct full mapping, including hydrogen bonds
-    G_fingerprint = syst_to_graph(syst_fingerprint_pbc.atoms[1:], vdwradii={metal_name: 1.0})
+    G_fingerprint = syst_to_graph(
+        syst_fingerprint_pbc.atoms[1:], vdwradii={metal_name: 1.0}
+    )
 
     # no_metal = connected_cut_system_pbc.select_atoms(f"not index {metal_index:d}", sorted=False)
-    no_metal = connected_cut_system_pbc[1:]  # .select_atoms(f"not index {metal_index:d}", sorted=False)
+    no_metal = connected_cut_system_pbc[
+        1:
+    ]  # .select_atoms(f"not index {metal_index:d}", sorted=False)
     G_site = syst_to_graph(no_metal.atoms, vdwradii={metal_name: 1.0})
     # G_site = nx.Graph(
     #    MDAnalysis.topology.guessers.guess_bonds(no_metal.atoms, no_metal.atoms.positions))
 
     # we copy indexes of heavy atoms
-    heavy = {node: node for node in G_fingerprint.nodes if node in G_fingerprint_heavy_atoms.nodes}
+    heavy = {
+        node: node
+        for node in G_fingerprint.nodes
+        if node in G_fingerprint_heavy_atoms.nodes
+    }
     # to all atoms not present (i.e., hydrogens) we add -1:
-    hydrogens = {node: -1 for node in G_fingerprint.nodes if node not in G_fingerprint_heavy_atoms.nodes}
+    hydrogens = {
+        node: -1
+        for node in G_fingerprint.nodes
+        if node not in G_fingerprint_heavy_atoms.nodes
+    }
 
     # the atoms which are not part of mapping are hydrogens:
     inverted_best_mapping = dict((b, a) for a, b in best_mapping.items())
-    not_mapped = {atom.index: -1 for atom in no_metal.atoms if atom.index not in inverted_best_mapping}
+    not_mapped = {
+        atom.index: -1
+        for atom in no_metal.atoms
+        if atom.index not in inverted_best_mapping
+    }
 
     # assigning the indexes to the graphs:
     nx.set_node_attributes(G_fingerprint, {**heavy, **hydrogens}, "idx")
     nx.set_node_attributes(G_site, {**inverted_best_mapping, **not_mapped}, "idx")
 
-    iso = isomorphism.GraphMatcher(G_fingerprint, G_site, node_match=lambda n1, n2: n1['idx'] == n2['idx'])
+    iso = isomorphism.GraphMatcher(
+        G_fingerprint, G_site, node_match=lambda n1, n2: n1["idx"] == n2["idx"]
+    )
 
     if iso.is_isomorphic():
         # we copy one of the mappings, now we do not have to worry about hydrogen atoms:
@@ -240,10 +316,9 @@ def map_two_structures(metal_index, connected_cut_system, syst_fingerprint, meta
         raise ValueError("ERROR, more than one metal in the site")
 
     # Remove the end atoms from the mapping:
-    logger.info(f"Best mapping:")
+    logger.info("Best mapping:")
     # logger.info(f"    Mapping: {best_mapping}")
     logger.info(f"    Mapping: {whole_best_mapping}")
     logger.info(f"\t\t\tRMSD: {best_rmsd:}")
 
     return whole_best_mapping, best_rmsd
-

@@ -1,13 +1,15 @@
-import MDAnalysis
-from MDAnalysis.lib.distances import calc_dihedrals
-import numpy as np
-
 import os
-from scipy.optimize import minimize
+
+import MDAnalysis
 import networkx as nx
+import numpy as np
+from MDAnalysis.lib.distances import calc_dihedrals
+from scipy.optimize import minimize
+
+from metallicious.log import logger
 from metallicious.mapping import map_two_structures
 from metallicious.utils import new_directory, strip_numbers_from_atom_names
-from metallicious.log import logger
+
 
 def find_donor_indices(bonds):
     """
@@ -15,7 +17,9 @@ def find_donor_indices(bonds):
     :param bonds: (list(int,int)) list of indices pairs describing bonds
     :return: (list(int)) indices of donor atoms
     """
-    indices = list(nx.generators.ego_graph(nx.Graph([bond for bond in bonds]), 0, radius=1).nodes)
+    indices = list(
+        nx.generators.ego_graph(nx.Graph([bond for bond in bonds]), 0, radius=1).nodes
+    )
     indices.remove(0)
 
     return indices
@@ -32,11 +36,21 @@ def find_potential_impropers(bonds, donor_indices):
     indices = []
     for donor_index in donor_indices:
         indices_connected_to_donor = list(
-            nx.generators.ego_graph(nx.Graph([bond for bond in bonds]), donor_index, radius=1).nodes)
+            nx.generators.ego_graph(
+                nx.Graph([bond for bond in bonds]), donor_index, radius=1
+            ).nodes
+        )
         if len(indices_connected_to_donor) == 4:
-            indices_of_middle_atoms = [index for index in indices_connected_to_donor if index not in [0, donor_index]]
-            indices.append([0, indices_of_middle_atoms[0], indices_of_middle_atoms[1], donor_index])
+            indices_of_middle_atoms = [
+                index
+                for index in indices_connected_to_donor
+                if index not in [0, donor_index]
+            ]
+            indices.append(
+                [0, indices_of_middle_atoms[0], indices_of_middle_atoms[1], donor_index]
+            )
     return indices
+
 
 def filter_aromatic_impropers(filename, potential_impropers, metal_name):
     """
@@ -50,13 +64,15 @@ def filter_aromatic_impropers(filename, potential_impropers, metal_name):
 
     syst = MDAnalysis.Universe(filename)
     for atom in syst.select_atoms(f"name {metal_name:}"):
-        atom.type = 'H'  # we change type of metal for hydrogen, because VdW radii is required for aromaticity
+        atom.type = "H"  # we change type of metal for hydrogen, because VdW radii is required for aromaticity
 
-    if not hasattr(syst.atoms[0], 'element'):
-        guessed_elements = MDAnalysis.topology.guessers.guess_types(strip_numbers_from_atom_names(syst.names))
+    if not hasattr(syst.atoms[0], "element"):
+        guessed_elements = MDAnalysis.topology.guessers.guess_types(
+            strip_numbers_from_atom_names(syst.names)
+        )
         for atom in syst.select_atoms(f"name {metal_name:}"):
-            guessed_elements[atom.idx] = 'H'
-        syst.universe.add_TopologyAttr('elements', guessed_elements)
+            guessed_elements[atom.idx] = "H"
+        syst.universe.add_TopologyAttr("elements", guessed_elements)
 
     aromaticity = MDAnalysis.topology.guessers.guess_aromaticities(syst.atoms)
 
@@ -66,7 +82,13 @@ def filter_aromatic_impropers(filename, potential_impropers, metal_name):
     return aromatic_impropers
 
 
-def scan_improper(improper, filename='bonded/site0_optimised_orca.xyz', charge=0, mult=1, x=np.linspace(0, 5, 2)):
+def scan_improper(
+    improper,
+    filename="bonded/site0_optimised_orca.xyz",
+    charge=0,
+    mult=1,
+    x=np.linspace(0, 5, 2),
+):
     """
     Modification to autodE, which allows to perform scan of the dihedrals
     :param improper: list(int,int,int,int) dihedral for QM scan
@@ -76,12 +98,20 @@ def scan_improper(improper, filename='bonded/site0_optimised_orca.xyz', charge=0
     :param x: list(float): space which will be scanned
     :return: list(float): electronic energy of the scanned coordinate
     """
-    import autode as ade
     from collections.abc import MutableMapping
-    from autode.wrappers.ORCA import logger, print_added_internals, print_distance_constraints, \
-        print_cartesian_constraints, print_num_optimisation_steps, print_point_charges, print_default_params, \
-        print_coordinates
+
+    import autode as ade
     from autode.values import Angle
+    from autode.wrappers.ORCA import (
+        logger,
+        print_added_internals,
+        print_cartesian_constraints,
+        print_coordinates,
+        print_default_params,
+        print_distance_constraints,
+        print_num_optimisation_steps,
+        print_point_charges,
+    )
 
     class DihedralConstraints(MutableMapping):
         def __init__(self, *args, **kwargs):
@@ -184,7 +214,9 @@ def scan_improper(improper, filename='bonded/site0_optimised_orca.xyz', charge=0
 
     method = ade.methods.ORCA()
     if method.is_available is False:
-        raise NameError("For parametrization of templates, QM software ORCA is required")
+        raise NameError(
+            "For parametrization of templates, QM software ORCA is required"
+        )
 
     # overwrite the autode ORCA input
     ade.wrappers.ORCA.ORCA.generate_input_for = generate_input_for_new
@@ -201,11 +233,13 @@ def scan_improper(improper, filename='bonded/site0_optimised_orca.xyz', charge=0
 
     for angle in x:
         logger.debug(f"{molecule.atoms[0]:}, angle: {angle}")
-        molecule.name = name + '_' + str(angle)
+        molecule.name = name + "_" + str(angle)
         molecule.constraints.dihedral = DihedralConstraints({tuple(improper): angle})
         molecule.optimise(method=method)
         energies.append(molecule.energy.to("kcal"))  # amber uses kcal/mol units
-    energies = np.array(energies) - np.min(energies)  # we change it to array and normalize it
+    energies = np.array(energies) - np.min(
+        energies
+    )  # we change it to array and normalize it
 
     logger.info(f"Torsion energy: {energies}")
 
@@ -215,7 +249,7 @@ def scan_improper(improper, filename='bonded/site0_optimised_orca.xyz', charge=0
     return energies
 
 
-def evaluate_angle(improper, filename='bonded/site0_optimised_orca.xyz'):
+def evaluate_angle(improper, filename="bonded/site0_optimised_orca.xyz"):
     """
     Calculates dihedral angle for input structure
     :param improper: list(int) list of indices indicating dihedral
@@ -240,14 +274,22 @@ def evaluate_improper_energy(energies, x=np.linspace(0, 20, 5)):
     initial_force = 0
 
     def evaluate(k):
-        return np.sum(np.abs(k * (np.deg2rad(x)) ** 2 - energies))  # in AMBER format, that is why it's missing 0.5
+        return np.sum(
+            np.abs(k * (np.deg2rad(x)) ** 2 - energies)
+        )  # in AMBER format, that is why it's missing 0.5
 
-    result = minimize(evaluate, x0=[initial_force], options={'eps': 1})
+    result = minimize(evaluate, x0=[initial_force], options={"eps": 1})
     return result.x[0]
 
 
-def improper_value_calculation(improper, filename='bonded/site_optimised_orca.xyz', charge=0, mult=1,
-                               angles_to_check=np.linspace(0, 20, 5), angle_cutoff=5):
+def improper_value_calculation(
+    improper,
+    filename="bonded/site_optimised_orca.xyz",
+    charge=0,
+    mult=1,
+    angles_to_check=np.linspace(0, 20, 5),
+    angle_cutoff=5,
+):
     """
     For given improper dihedral perform QM scan
 
@@ -263,7 +305,9 @@ def improper_value_calculation(improper, filename='bonded/site_optimised_orca.xy
     if angle < angle_cutoff:
         angle = 0
 
-        energies = scan_improper(improper, filename=filename, charge=charge, mult=mult, x=angles_to_check)
+        energies = scan_improper(
+            improper, filename=filename, charge=charge, mult=mult, x=angles_to_check
+        )
         value = evaluate_improper_energy(energies, x=angles_to_check)
 
         logger.info("\tEnergies:", energies)
@@ -274,7 +318,9 @@ def improper_value_calculation(improper, filename='bonded/site_optimised_orca.xy
         return angle, 0.0
 
 
-def find_impropers_connected_to_metal(bonds, metal_name, filename='bonded/site_opt_orca.xyz'):
+def find_impropers_connected_to_metal(
+    bonds, metal_name, filename="bonded/site_opt_orca.xyz"
+):
     """
     Finds improper dihedrals connected to metal and aromatic moiety
     :param bonds: (list(int,int)) list of indices pairs describing bonds
@@ -297,8 +343,16 @@ def symmetric_improper(improper):
     return [improper[0], improper[2], improper[1], improper[3]]
 
 
-def find_impropers_and_values(bonds, metal_name, unique_ligands_pattern, starting_index, indices, charge, mult=1,
-                              filename='bonded/site_opt_orca.xyz'):
+def find_impropers_and_values(
+    bonds,
+    metal_name,
+    unique_ligands_pattern,
+    starting_index,
+    indices,
+    charge,
+    mult=1,
+    filename="bonded/site_opt_orca.xyz",
+):
     """
     The main routine for identifying dihedrals
 
@@ -334,7 +388,9 @@ def find_impropers_and_values(bonds, metal_name, unique_ligands_pattern, startin
         # calculating
         values_of_checked_impropers = []
         for improper in impropers_to_calculate:
-            value = improper_value_calculation(improper, filename=filename, charge=charge, mult=mult)
+            value = improper_value_calculation(
+                improper, filename=filename, charge=charge, mult=mult
+            )
 
             values_of_checked_impropers.append(value)
             new_dihedrals[tuple(improper)] = tuple(value)
@@ -342,22 +398,34 @@ def find_impropers_and_values(bonds, metal_name, unique_ligands_pattern, startin
 
         if len(same_ligands) > 1:
             for same_ligand in same_ligands[1:]:
-                logger.debug(f"{same_ligand:}, {starting_index[1:][same_ligand] - first_start_index:}")
+                logger.debug(
+                    f"{same_ligand:}, {starting_index[1:][same_ligand] - first_start_index:}"
+                )
 
                 syst = MDAnalysis.Universe(filename)
                 ligand1 = syst.atoms[
-                    [0] + indices[1:][same_ligands[0]]]  # ligand + metal (metal is necessary for symmetry)
+                    [0] + indices[1:][same_ligands[0]]
+                ]  # ligand + metal (metal is necessary for symmetry)
                 ligand2 = syst.atoms[[0] + indices[1:][same_ligand]]
 
-                mapping, _ = map_two_structures(0, ligand2, ligand1,
-                                                metal_name)  # we map one of the ligands+metal on second
-                proposed_torsions = [[mapping[a] for a in improper] for improper in
-                                     impropers_to_calculate]  # map calculated impropers on the mapped ligands
+                mapping, _ = map_two_structures(
+                    0, ligand2, ligand1, metal_name
+                )  # we map one of the ligands+metal on second
+                proposed_torsions = [
+                    [mapping[a] for a in improper]
+                    for improper in impropers_to_calculate
+                ]  # map calculated impropers on the mapped ligands
 
                 # check if found the same torsions:
-                assert sum(1 for proposed_torsion in proposed_torsions if (list(proposed_torsion) in impropers) or (
-                    symmetric_improper(proposed_torsion)) in impropers) == len(proposed_torsions)
+                assert sum(
+                    1
+                    for proposed_torsion in proposed_torsions
+                    if (list(proposed_torsion) in impropers)
+                    or (symmetric_improper(proposed_torsion)) in impropers
+                ) == len(proposed_torsions)
                 for idx_tor, proposed_torsion in enumerate(proposed_torsions):
-                    new_dihedrals[tuple(proposed_torsion)] = tuple(values_of_checked_impropers[idx_tor])
+                    new_dihedrals[tuple(proposed_torsion)] = tuple(
+                        values_of_checked_impropers[idx_tor]
+                    )
 
     return new_dihedrals
