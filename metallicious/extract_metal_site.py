@@ -13,6 +13,7 @@ from rdkit import Chem
 from metallicious.log import logger
 from metallicious.mapping import map_two_structures, unwrap
 from metallicious.utils import (
+    get_mda_bonds,
     guess_aromaticities,
     guess_chirality,
     new_directory,
@@ -66,8 +67,10 @@ def find_bound_ligands_nx(
     donors=None,
 ):
     """
-    Finds bound ligands to metal, assumes that atoms within cutoff_covalent (default 3) are bound to metal.
-    Returns list of sub-graphs of bound ligands; it does not cut ligands (so they can be uneven)
+    Finds bound ligands to metal, assumes that atoms within cutoff_covalent
+    (default 3) are bound to metal.
+    Returns list of sub-graphs of bound ligands; it does not cut ligands
+    (so they can be uneven)
 
     :param closest_neighbhors:
     :param cage:
@@ -90,14 +93,10 @@ def find_bound_ligands_nx(
 
     metal = cage.atoms[metal_index]
 
-    G_cage = nx.Graph(
-        MDAnalysis.topology.guessers.guess_bonds(
-            cut_sphere.atoms,
-            cut_sphere.atoms.positions,
-            box=cage.dimensions,
-            vdwradii=additional_atom_types,
-        )
-    )
+    bonds = get_mda_bonds(cut_sphere)
+
+    G_cage = nx.Graph(bonds)
+
     nx.set_node_attributes(
         G_cage, {atom.index: atom.name[0] for atom in cut_sphere.atoms}, "name"
     )
@@ -107,57 +106,73 @@ def find_bound_ligands_nx(
     closest_atoms_ligands = []
 
     G_sub_cages_bound = []
-    for G_sub_cage in G_sub_cages:
+    for i, G_sub_cage in enumerate(G_sub_cages):
         closest_atoms = []  # closest atoms, we assume that they are donors of electrons
         clusters_of_atoms = cage.atoms[list(G_sub_cage)]
 
+        if donors is not None:
+            donor_string = "("
+            for dtype in donors:
+                donor_string += f"type {dtype} "
+            donor_string += ")"
+
+            clusters_of_atoms = clusters_of_atoms.select_atoms(
+                donor_string, sorted=False
+            )
+        if len(clusters_of_atoms) == 0:
+            continue
+
         all_metal_cluster_distances = distance_array(
-            clusters_of_atoms.positions, metal.position, box=cage.dimensions
+            clusters_of_atoms.positions,
+            metal.position,
+            box=cage.dimensions,
         )
 
-        if np.min(all_metal_cluster_distances) < cutoff_covalent:
-            G_sub_cages_bound.append(G_sub_cage)
-            G_indices = list(G_sub_cage.nodes)
+        if np.min(all_metal_cluster_distances) > cutoff_covalent:
+            continue
 
-            # we now search closest atoms, if atoms are futher then closest_neighbhors then we also add it to clostest atoms
-            # this is needed for bidente lignads
-            ordered = np.argsort(all_metal_cluster_distances.T[0])
-            close_atoms = []
-            close_atoms.append(ordered[0])
+        G_sub_cages_bound.append(G_sub_cage)
+        G_indices = list(G_sub_cage.nodes)
 
-            for order in ordered[1:]:
-                if (
-                    all_metal_cluster_distances.T[0][order] < cutoff_covalent
-                ):  # order has to be change to real number!
-                    append = True
-                    for temp_atom in close_atoms:
-                        if (
-                            nx.shortest_path_length(
-                                G_sub_cage, G_indices[temp_atom], G_indices[order]
-                            )
-                            < closest_neighbhors
-                        ):
-                            append = False
-                    if append == True:
-                        close_atoms.append(order)
+        # we now search closest atoms, if atoms are futher then closest_neighbhors then we also add it to clostest atoms
+        # this is needed for bidente lignads
+        ordered = np.argsort(all_metal_cluster_distances.T[0])
+        close_atoms = []
+        close_atoms.append(ordered[0])
 
-            # temp_atom = clusters_of_atoms.atoms[np.argmin(all_metal_cluster_distances)]
-            for atom in close_atoms:
-                temp_atom = clusters_of_atoms.atoms[atom]
-                add = False
-                if donors is not None:
-                    if not hasattr(temp_atom, "type"):
-                        add = (
-                            True  # we need to take a guess that this atom is a donor...
+        for order in ordered[1:]:
+            if (
+                all_metal_cluster_distances.T[0][order] < cutoff_covalent
+            ):  # order has to be change to real number!
+                append = True
+                for temp_atom in close_atoms:
+                    if (
+                        nx.shortest_path_length(
+                            G_sub_cage, G_indices[temp_atom], G_indices[order]
                         )
-                    elif temp_atom.type in donors:
-                        add = True
-                else:  # we add everything
-                    add = True
+                        < closest_neighbhors
+                    ):
+                        append = False
 
-                if add:
-                    closest_atoms_string += f" {temp_atom.name:s} {temp_atom.index:d}: {all_metal_cluster_distances[atom][0]:f} A"
-                    closest_atoms.append(temp_atom.index)
+                if append:
+                    close_atoms.append(order)
+
+        # temp_atom = clusters_of_atoms.atoms[np.argmin(all_metal_cluster_distances)]
+        for atom in close_atoms:
+            temp_atom = clusters_of_atoms.atoms[atom]
+            add = False
+
+            if donors is not None:
+                if not hasattr(temp_atom, "type"):
+                    add = True  # we need to take a guess that this atom is a donor...
+                elif temp_atom.type in donors:
+                    add = True
+            else:  # we add everything
+                add = True
+
+            if add:
+                closest_atoms_string += f" {temp_atom.name:s} {temp_atom.index:d}: {all_metal_cluster_distances[atom][0]:f} A"
+                closest_atoms.append(temp_atom.index)
 
             closest_atoms_ligands.append(closest_atoms)
 
@@ -198,7 +213,9 @@ def find_bound_ligands_nx(
         G_sub_cages_bound = G_sub_cages_bound_cutoff
         closest_atoms_ligands = closest_atoms_ligands_cutoff
 
-    # ourput is list with n_ligands graphs representing diffrent ligands, and closest atoms (donors of electrons)
+    # ourput is list with n_ligands graphs representing diffrent ligands,
+    # and closest atoms (donors of electrons)
+
     return G_sub_cages_bound, closest_atoms_ligands
 
 

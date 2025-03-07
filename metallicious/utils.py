@@ -1,8 +1,33 @@
 import os
 import re
+from collections import abc
 
 import numpy as np
 import rdkit
+import stk
+from MDAnalysis.core.universe import MDAnalysis
+
+
+def prepare_universe_from_stk(molecule: stk.Molecule) -> MDAnalysis.Universe:
+    """Prepares a universe from stk molecule."""
+    syst = MDAnalysis.Universe(molecule.to_rdkit_mol())
+    if not hasattr(syst.atoms[0], "element"):
+        guessed_elements = MDAnalysis.topology.guessers.guess_types(syst)
+        syst.universe.add_TopologyAttr("elements", guessed_elements)
+    return syst
+
+
+def get_mda_bonds(group: MDAnalysis.AtomGroup) -> abc.Sequence[tuple[int, int]]:
+    """Get the mdanalysis bonds in an atom group."""
+    bonds = []
+
+    for bond in group.bonds:
+        indices = tuple(bond.indices)
+
+        idx1, idx2 = indices
+        if idx1 in group.indices and idx2 in group.indices:
+            bonds.append(indices)
+    return tuple(bonds)
 
 
 def new_directory(directory):

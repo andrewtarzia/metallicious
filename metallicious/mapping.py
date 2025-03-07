@@ -7,15 +7,11 @@ import numpy as np
 from MDAnalysis.analysis.rms import rmsd
 from networkx.algorithms import isomorphism
 
-# try:
 from metallicious.log import logger
-from metallicious.utils import strip_numbers_from_atom_name
-
-# except:
-#     from log import logger
+from metallicious.utils import get_mda_bonds, strip_numbers_from_atom_name
 
 
-def syst_to_graph(atoms, vdwradii):
+def syst_to_graph(atoms, vdwradii, metal_index: int | None):
     """
     Transforms MDAnalysis.Universe.atoms to the Graph (edges are bonds)
 
@@ -23,7 +19,12 @@ def syst_to_graph(atoms, vdwradii):
     :param vdwradii: (dict) dictionary of names and charges
     :return: (NetworkX.Graph) Graph where edges are bonds
     """
-    bonds = MDAnalysis.topology.guessers.guess_bonds(atoms, atoms.positions)
+
+    try:
+        bonds = get_mda_bonds(atoms)
+    except MDAnalysis.exceptions.NoDataError:
+        bonds = MDAnalysis.topology.guessers.guess_bonds(atoms, atoms.positions)
+
     G_fingerprint = nx.Graph()
     if len(bonds) > 0:  # fingerprint with ligands larger than one atom
         G_fingerprint = nx.Graph(bonds, vdwradii=vdwradii)
@@ -78,17 +79,26 @@ def int_list_to_str(lista):
 
 def map_two_structures(metal_index, connected_cut_system, syst_fingerprint, metal_name):
     """
-    Compares two structures (connected_cut_system and syst_fingerprint) and tries to find the equivalent atoms in each.
-    The equivalent atoms are storred as dictionary (e.g.,{1:2,2:1,3:3}), which shows the index of equivalent atoms in
-    the other structure. Mapping is necessary to copy template to the input structure
+    Compares two structures (connected_cut_system and syst_fingerprint) and
+    tries to find the equivalent atoms in each.
+
+    The equivalent atoms are storred as dictionary (e.g.,{1:2,2:1,3:3}),
+    which shows the index of equivalent atoms in
+    the other structure. Mapping is necessary to copy template to the input
+    structure
 
     :param metal_index: (int) metal index in input structure
-    :param connected_cut_system: (MDAnalysis.Universe.atoms) input structure 1,for which mapping will be found
-    :param syst_fingerprint:(MDAnalysis.Universe.atoms) input structure 2, which is reference
+    :param connected_cut_system: (MDAnalysis.Universe.atoms) input structure 1,
+    for which mapping will be found
+    :param syst_fingerprint:(MDAnalysis.Universe.atoms) input structure 2,
+    which is reference
     :param metal_name: (str) metal name
-    :return: (dict, int): the mapping, and the RMSD of syst_fingerprint and reordered (mapped) connected_cut_system
+    :return: (dict, int): the mapping, and the RMSD of syst_fingerprint and
+    reordered (mapped) connected_cut_system
     """
-    # usually fingerprint suppose to not have the PBC, but for standrazing purposes we unwrap it:
+
+    # usually fingerprint suppose to not have the PBC, but for standrazing
+    # purposes we unwrap it:
     syst_fingerprint_pbc = syst_fingerprint
     if syst_fingerprint.universe.dimensions is not None:
         syst_fingerprint_pbc = unwrap(syst_fingerprint, syst_fingerprint[0].type)
@@ -99,7 +109,9 @@ def map_two_structures(metal_index, connected_cut_system, syst_fingerprint, meta
     )
 
     G_fingerprint_heavy_atoms = syst_to_graph(
-        syst_fingerprint_heavy_atoms.atoms[1:], vdwradii={metal_name: 1.0}
+        syst_fingerprint_heavy_atoms.atoms[1:],
+        vdwradii={metal_name: 1.0},
+        metal_index=0,
     )
 
     G_fingerprint_subs_heavy_atoms = [
@@ -119,11 +131,12 @@ def map_two_structures(metal_index, connected_cut_system, syst_fingerprint, meta
 
     no_metal_heavy_atoms = connected_cut_system_pbc_heavy_atoms[1:]
 
-    G_site_heavy_atoms = syst_to_graph(no_metal_heavy_atoms, vdwradii={metal_name: 1.0})
+    G_site_heavy_atoms = syst_to_graph(
+        no_metal_heavy_atoms,
+        vdwradii={metal_name: 1.0},
+        metal_index=0,
+    )
 
-    # G_site_heavy_atoms = nx.Graph(
-    #    MDAnalysis.topology.guessers.guess_bonds(no_metal_heavy_atoms.atoms, no_metal_heavy_atoms.atoms.positions))
-    # nx.set_node_attributes(G_site_heavy_atoms, {atom.index: atom.name[0] for atom in no_metal_heavy_atoms.atoms}, "name")
     G_site_subs_heavy_atoms = [
         G_site_heavy_atoms.subgraph(a)
         for a in nx.connected_components(G_site_heavy_atoms)
@@ -264,14 +277,20 @@ def map_two_structures(metal_index, connected_cut_system, syst_fingerprint, meta
 
     # Reconstruct full mapping, including hydrogen bonds
     G_fingerprint = syst_to_graph(
-        syst_fingerprint_pbc.atoms[1:], vdwradii={metal_name: 1.0}
+        syst_fingerprint_pbc.atoms[1:],
+        vdwradii={metal_name: 1.0},
+        metal_index=0,
     )
 
     # no_metal = connected_cut_system_pbc.select_atoms(f"not index {metal_index:d}", sorted=False)
     no_metal = connected_cut_system_pbc[
         1:
     ]  # .select_atoms(f"not index {metal_index:d}", sorted=False)
-    G_site = syst_to_graph(no_metal.atoms, vdwradii={metal_name: 1.0})
+    G_site = syst_to_graph(
+        no_metal.atoms,
+        vdwradii={metal_name: 1.0},
+        metal_index=0,
+    )
     # G_site = nx.Graph(
     #    MDAnalysis.topology.guessers.guess_bonds(no_metal.atoms, no_metal.atoms.positions))
 
@@ -305,7 +324,8 @@ def map_two_structures(metal_index, connected_cut_system, syst_fingerprint, meta
     )
 
     if iso.is_isomorphic():
-        # we copy one of the mappings, now we do not have to worry about hydrogen atoms:
+        # we copy one of the mappings, now we do not have to worry about
+        # hydrogen atoms:
         whole_best_mapping = iso.mapping
     else:
         raise ValueError("Error, not found the mapping")

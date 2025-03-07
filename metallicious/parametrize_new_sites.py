@@ -1,8 +1,10 @@
 import os
+import pathlib
 import shutil
 
 import MDAnalysis
 import numpy as np
+import stk
 from MDAnalysis.lib.distances import distance_array
 
 from metallicious.asserts import (
@@ -20,17 +22,25 @@ from metallicious.copy_topology_params import (
 )
 from metallicious.data import vdw_data
 from metallicious.extract_metal_site import extract_metal_structure, find_metal_indices
-from metallicious.load_fingerprint import guess_fingerprint, load_fp_from_file
+from metallicious.load_fingerprint import (
+    guess_fingerprint,
+    guess_fingerprint_stk,
+    load_fp_from_file,
+)
 from metallicious.log import logger
-from metallicious.patcher import patcher
-from metallicious.prepare_initial_topology import prepare_initial_topology
+from metallicious.patcher import StkPatcher, patcher
+from metallicious.prepare_initial_topology import (
+    prepare_initial_topology,
+    prepare_stk_initial_topology,
+)
 from metallicious.seminario import check_if_orca_available, single_seminario
-from metallicious.utils import new_directory
+from metallicious.utils import new_directory, prepare_universe_from_stk
 
 
 class supramolecular_structure:
     """
-    The main structure holidng all the information about the intput and communicating between different classes
+    The main structure holidng all the information about the intput and
+    communicating between different classes.
 
     """
 
@@ -188,8 +198,7 @@ class supramolecular_structure:
 
     def find_metal_sites(self):
         syst = MDAnalysis.Universe(self.filename)
-        print(syst)
-        raise SystemExit
+
         for name in self.metal_names:
             indices, _ = find_metal_indices(syst, name)
             for index in indices:
@@ -332,7 +341,7 @@ class supramolecular_structure:
     def parametrize(
         self, out_coord="out.pdb", out_topol="out.top", prepare_initial_topology=False
     ):
-        if prepare_initial_topology == True:
+        if prepare_initial_topology:
             self.prepare_initial_topology()
 
         if self.topol is None:
@@ -362,6 +371,409 @@ class supramolecular_structure:
             tmpdir_path=self.tmpdir_path,
         )
         logger.info("[+] Finished!")
+        return True
+
+    def parametrize_metal_sites(self):
+        if len(self.unique_sites) == 0:
+            self.extract_unique_metal_sites()
+
+        if len(self.unique_sites) > 0 and self.allow_new_templates is True:
+            check_if_orca_available()
+
+        for site in self.unique_sites:
+            # if site.check_library() is False:
+            if site.fp_topol_file is None:
+                if self.allow_new_templates is True:
+                    check_if_parametrization_modules_available()
+
+                    site.parametrize()
+                    self.add_site_to_library(site)
+                else:
+                    raise Exception(
+                        "Template not found (try to (a) parametrize it (specify multiplicity) or (b) truncate template)"
+                    )
+
+    def add_site_to_library(self, site):
+        # adding to the library
+        if os.path.isfile(site.fp_topol_file) and os.path.isfile(site.fp_coord_file):
+            file_idx = 0
+            while True:
+                if os.path.isfile(f"{self.library_path:}/{site.name}_{file_idx}.top"):
+                    file_idx += 1
+                else:
+                    break
+
+            if self.vdw_type != "custom":  # if it custom we don't want it
+                logger.info(
+                    f"[+] Saving as {self.library_path:}/{site.name}_{file_idx}.top"
+                )
+                shutil.copyfile(
+                    site.fp_topol_file,
+                    f"{self.library_path:}/{site.name}_{file_idx}.top",
+                )
+                shutil.copyfile(
+                    site.fp_coord_file,
+                    f"{self.library_path:}/{site.name}_{file_idx}.pdb",
+                )
+                file_idx += 1
+
+    def summary(self):
+        string = "Sites:\n"
+        for site in self.sites:
+            string += site._print() + "\n"
+
+        string += "\nUnique sites:"
+        for site in self.unique_sites:
+            string += f"{site.metal_name}({site.metal_charge}+)"
+
+
+class stk_supramolecular_structure:
+    """Handles the use of topoly through an stk interface."""
+
+    def __init__(
+        self,
+        filename: str,
+        molecule: stk.Molecule,
+        metal_charge_mult=None,
+        metal_charges=None,
+        LJ_type=None,
+        topol=None,
+        keywords=["PBE0", "D3BJ", "def2-SVP", "tightOPT", "freq"],
+        improper_metal=None,
+        donors=["N", "S", "O"],
+        library_path=f"{os.path.dirname(__file__):s}/library/",
+        ff="gaff",
+        search_library=True,
+        fingerprint_guess_list=None,
+        truncation_scheme=None,
+        covalent_cutoff=3,
+        rmsd_cutoff=2,
+    ):
+        """
+        Initialize the class
+
+        :param filename: (str) name of the coordination file
+        :param metal_charge_mult:  (dict) the names charges, and multiplicity of the metals in format
+                                        {metal_name: (metal_charges, multiplicity)}
+        :param metal_charges: (dict) the names and charges of metals in the input structure in format:
+                                          {metal_name1: metal_charges1, metal1_name2: metal_charge2}
+        :param LJ_type: (str) name of LJ dataset used for metal paramters
+        :param topol: (str) path to topology (optional)
+        :param keywords: list(str) the keywords for QM calculations
+        :param improper_metal: (bool) if True it will parametrize the improper dihedral involving metal
+        :param donors: (list(str)) list of atom elements with which metal forms bond
+        :param library_path: (str) directory of template library, be default where the script is
+        :param ff: (str) parametrization protocol for small organic molecules (only gaff available)
+        :param search_library: (bool) if True, metallicious searches templates in template library,
+                    if False, it will parametrize template
+        :param fingerprint_guess_list: (list(str)) list of templates to check
+        :param truncation_scheme: (str) name of the truncation scheme
+        :param covalent_cutoff: (float) if metal-atoms smaller then cutoff it creates bonds ligand with metal
+        :param rmsd_cutoff: (float) cutoff for the RMSD acceptance of the template
+        """
+
+        logger.info(f"Library with templates is located: {library_path:}")
+
+        self.unique_sites = []
+        self.sites = []
+        self.library = library_path
+
+        self.autode_keywords = keywords
+        self.donors = donors
+        self.ff = ff
+
+        self.covalent_cutoff = covalent_cutoff
+        self.closest_neighbhors = 3
+
+        self.rmsd_cutoff = rmsd_cutoff
+
+        # if topol is not None:
+        # self.topol = self.make_metals_first(topol)
+        self.topol = topol
+        self.filename = filename
+        molecule.write(self.filename)
+
+        self.allow_new_templates = True
+
+        self.metal_charge_dict = {}
+        self.metal_mult_dict = None
+
+        if metal_charge_mult is not None:
+            self.metal_charge_dict = {}
+            self.metal_mult_dict = {}
+            for key in metal_charge_mult:
+                self.metal_charge_dict[key] = metal_charge_mult[key][0]
+                self.metal_mult_dict[key] = metal_charge_mult[key][1]
+
+            self.metal_names = list(metal_charge_mult.keys())
+        elif metal_charges is not None:
+            self.metal_charge_dict = metal_charges
+            self.metal_names = list(metal_charges.keys())
+            self.allow_new_templates = False
+        else:
+            raise ValueError("Not correct format of metal_charge_mult/metal_charges")
+
+        if improper_metal is None:
+            self.improper_metal = False
+            for metal_name in self.metal_charge_dict:
+                if (
+                    (
+                        metal_name in ["Pd", "Pt"]
+                        and self.metal_charge_dict[metal_name] == 2
+                    )
+                    or (
+                        metal_name in ["Rh", "Ir"]
+                        and self.metal_charge_dict[metal_name] == 1
+                    )
+                    or (
+                        metal_name in ["Au"] and self.metal_charge_dict[metal_name] == 3
+                    )
+                ):
+                    self.improper_metal = True
+        else:
+            self.improper_metal = improper_metal
+
+        if LJ_type == "custom" and topol is not None:
+            self.vdw_type = "custom"
+
+        elif LJ_type is None:
+            for LJ_type in vdw_data:
+                present = [
+                    (
+                        metal_name in vdw_data[LJ_type]
+                        or f"{metal_name:}{self.metal_charge_dict[metal_name]:}"
+                        in vdw_data[LJ_type]
+                    )
+                    for metal_name in self.metal_names
+                ]
+                if sum(present) == len(present):
+                    self.vdw_type = LJ_type
+                    logger.info(
+                        f"vdw_type not selected, will use first available for selected metals: {LJ_type:}"
+                    )
+        else:
+            for metal_name in self.metal_names:
+                if (
+                    metal_name not in vdw_data[LJ_type]
+                    and f"{metal_name:}{self.metal_charge_dict[metal_name]:}"
+                    not in vdw_data[LJ_type]
+                ):
+                    metal_available_in = []
+                    for LJ_type in vdw_data:
+                        if (
+                            metal_name in vdw_data[LJ_type]
+                            or f"{metal_name:}{self.metal_charge_dict[metal_name]:}"
+                            in vdw_data[LJ_type]
+                        ):
+                            metal_available_in.append(LJ_type)
+
+                    raise ValueError(
+                        f"Metal ({metal_name:}) unavailable in selected LJ library, but it seems it is present in {metal_available_in:}"
+                    )
+            self.vdw_type = LJ_type
+
+        self.fingerprint_guess_list = fingerprint_guess_list
+        self.truncation_scheme = truncation_scheme
+        self.search_library = search_library
+        self.library_path = f"{os.path.dirname(__file__):s}/library"
+
+        self.find_metal_sites(molecule)
+
+        self.path = os.getcwd()
+        # This is placeholder for temporary direction, but ORCA often breaks, and it is easier just to restart a job
+        self.tmpdir_path = "."  # mkdtemp()
+        os.chdir(self.tmpdir_path)
+
+    def find_metal_sites(self, molecule: stk.Molecule):
+        syst = prepare_universe_from_stk(molecule)
+
+        for name in self.metal_names:
+            indices, _ = find_metal_indices(syst, name)
+
+            for index in indices:
+                site = metal_site(
+                    name.title(),
+                    self.metal_charge_dict[name],
+                    index,
+                    fp_style=self.truncation_scheme,
+                    covalent_cutoff=self.covalent_cutoff,
+                    donors=self.donors,
+                )
+                self.sites.append(site)
+
+        self.assign_fingerprints(syst)
+
+    def assign_fingerprints(self, syst: MDAnalysis.Universe):
+        additional_fp_coords = {}
+        for unique_site in self.unique_sites:
+            if unique_site.fp_coord_file is not None:
+                suffix = "_" + unique_site.directory.split("_")[1]
+                additional_fp_coords[unique_site.name + suffix] = (
+                    unique_site.fp_coord_file
+                )
+
+        logger.info(f"Fingerprint to choose from: {additional_fp_coords:}")
+        for site in self.sites:
+            guessed = guess_fingerprint_stk(
+                universe=syst,
+                metal_index=site.index,
+                metal_name=site.metal_name,
+                metal_charge=site.metal_charge,
+                fingerprint_guess_list=self.fingerprint_guess_list,
+                m_m_cutoff=10,
+                vdw_type=self.vdw_type,
+                library_path=self.library_path,
+                search_library=self.search_library,
+                additional_fp_files=additional_fp_coords,
+                fp_style=self.truncation_scheme,
+                donors=self.donors,
+                rmsd_cutoff=self.rmsd_cutoff,
+            )
+
+            if guessed is not False:  # do not change to True...
+                site.fp_coord_file = f"{guessed:}.pdb"
+                site.fp_topol_file = f"{guessed:}.top"
+                site.load_fingerprint()
+                site.set_cutoff()
+            else:
+                logger.info("Template for this site not found")
+
+    def extract_unique_metal_sites(self):
+        logger.info("Extracting")
+        unique_sites = []
+
+        # extract metal sites:
+        for metal_name in self.metal_names:
+            site_lists = extract_metal_structure(
+                self.filename,
+                self.topol,
+                metal_name,
+                output=f"site_{metal_name:}",
+                all_metal_names=self.metal_names,
+                covalent_cutoff=self.covalent_cutoff,
+                donors=self.donors,
+                closest_neighbhors=self.closest_neighbhors,
+            )
+
+            for site_list in site_lists:
+                site_list[1] = self.metal_charge_dict[
+                    metal_name
+                ]  # we change the charge
+                if self.metal_mult_dict is not None:
+                    site_list[2] = self.metal_mult_dict[
+                        metal_name
+                    ]  # we change the multiplicity
+
+                site_list += [
+                    self.autode_keywords,
+                    self.improper_metal,
+                    self.donors,
+                    self.vdw_type,
+                    self.rmsd_cutoff,
+                ]
+                unique_sites += [new_metal_site(*site_list)]
+
+        self.unique_sites = unique_sites
+
+    def check_if_parameters_available(self):
+        # if len([1 for site in self.sites if site.fp_topol_file is not None]) == len(self.sites):
+        if len([1 for site in self.sites if site.fp_topol_file is not None]) == len(
+            self.sites
+        ):
+            return True
+        else:
+            return False
+
+    def prepare_initial_topology(
+        self,
+        molecule: stk.Molecule,
+        coord_filename="noncovalent_complex.pdb",
+        topol_filename="noncovalent_complex.top",
+        method="gaff",
+        homoleptic_ligand_topol=None,
+        subdir="init_topol",
+    ):
+        new_directory(subdir)
+
+        old_filename = self.filename
+        new_filename = self.filename[self.filename.rfind("/") + 1 :]
+
+        try:
+            shutil.copyfile(old_filename, f"{subdir}/{new_filename}")
+        except shutil.SameFileError:
+            pass
+
+        if homoleptic_ligand_topol is not None:
+            shutil.copyfile(
+                homoleptic_ligand_topol, f"{subdir}/{homoleptic_ligand_topol.name}"
+            )
+
+        if method == "gaff" or homoleptic_ligand_topol is not None:
+            metal_indicies = prepare_stk_initial_topology(
+                molecule=molecule,
+                metal_names=self.metal_names,
+                metal_charge=self.sites[0].metal_charge,
+                output_dir=subdir,
+                output_coord=subdir / coord_filename,
+                output_top=subdir / topol_filename,
+                metal_vdw=self.vdw_type,
+                ligand_topol=str(homoleptic_ligand_topol),
+            )
+            self.filename = f"{subdir}/{coord_filename}"
+            self.topol = f"{subdir}/{topol_filename}"
+
+            for metal_index, site in zip(metal_indicies, self.sites):
+                site.index = metal_index
+        else:
+            raise ValueError("Only GAFF supported")
+
+    def parametrize(
+        self,
+        molecule: stk.Molecule,
+        sub_dir: pathlib.Path,
+        out_coord="out.pdb",
+        out_topol="out.top",
+        prepare_initial_topology=False,
+        homoleptic_ligand_topol=None,
+    ):
+        if prepare_initial_topology:
+            self.prepare_initial_topology(
+                molecule=molecule,
+                homoleptic_ligand_topol=homoleptic_ligand_topol,
+                subdir=sub_dir,
+            )
+
+        if self.topol is None:
+            raise Exception(
+                "Topology file not specified, please provide topology, or use"
+                " prepare_initial_topology=True"
+            )
+
+        if self.check_if_parameters_available() is False:
+            logger.info("[ ] Extracting the structure")
+            self.parametrize_metal_sites()
+            self.assign_fingerprints()
+
+        logger.info(self.summary())
+        logger.info("The templates are available!")
+
+        # Check if number of atoms agree in both files
+        compare_topology_and_coords(self.topol, self.filename)
+
+        parameter_copier = StkPatcher(cage_molecule=molecule)
+        parameter_copier.copy_site_topology_to_supramolecular(
+            self.sites,
+            cage_coord=self.filename,
+            cage_topol=self.topol,
+        )
+
+        parameter_copier.save(
+            f"{self.path:s}/{str(out_coord):s}",
+            f"{self.path:s}/{str(out_topol):s}",
+            tmpdir_path=self.tmpdir_path,
+        )
+        logger.info("[+] Finished!")
+
         return True
 
     def parametrize_metal_sites(self):
@@ -459,7 +871,10 @@ class metal_site:
 
     def _print(self):
         if self.fp_coord_file is not None:
-            return f"<{self.index}: {self.metal_name}({self.metal_charge}+) {self.fp_coord_file.split('/')[-1]}>"
+            return (
+                f"<{self.index}: {self.metal_name}({self.metal_charge}+)"
+                f" {self.fp_coord_file.split('/')[-1]}>"
+            )
         else:
             return f"<{self.index}: {self.metal_name}({self.metal_charge}+) None>"
 

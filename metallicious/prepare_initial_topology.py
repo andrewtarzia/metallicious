@@ -1,9 +1,11 @@
+import argparse
 from copy import deepcopy
 
 import MDAnalysis
 import networkx as nx
 import numpy as np
 import parmed as pmd
+import stk
 from networkx.algorithms import isomorphism
 
 from metallicious.antechamber_interface import (
@@ -14,6 +16,7 @@ from metallicious.extract_metal_site import find_metal_indices
 from metallicious.initial_site import create_metal_topol
 from metallicious.log import logger
 from metallicious.mapping import unwrap
+from metallicious.utils import get_mda_bonds
 
 
 def mapping_itp_coords(syst, ligand_file):
@@ -78,7 +81,7 @@ def prepare_initial_topology(
     :return: (list(int)) indices of the metals in coordination/topology file
     """
 
-    if check_antechamber_if_available() == False and ligand_topol is None:
+    if not check_antechamber_if_available() and ligand_topol is None:
         raise ImportError(
             "Not antechamber detected (preparation of initial topology is done by antechamber)"
         )
@@ -147,7 +150,7 @@ def prepare_initial_topology(
                 if iso.is_isomorphic():
                     is_isomorphic = True
                     break
-            if is_isomorphic == False:
+            if not is_isomorphic:
                 ligand_library.append(nodes)
 
     Gtops = []  # nx graphs
@@ -164,6 +167,8 @@ def prepare_initial_topology(
         )  # what if there are more then one topologies (?)
         if not is_iso:  # if not isomorphic we paramterize with antechamber:
             ligand_coords_mda.atoms.write("temp.pdb")
+            ligand_coords_mda.atoms.write(f"linker{idx:}.pdb")
+
             antechamber("temp.pdb", f"linker{idx:}.top")
             ligand = pmd.load_file(f"linker{idx:}.top")
 
@@ -180,6 +185,7 @@ def prepare_initial_topology(
         ligand_tops.append(ligand)
         topologies.append(topology)
         Gtops.append(Gtop)
+    raise SystemExit
 
     new_ligands = []
 
@@ -187,7 +193,6 @@ def prepare_initial_topology(
 
     # parmed has issues if ligands are merged, but molecules are not grouped togheter
     ligand_group = {}
-
     for z, nodes in enumerate(nx.connected_components(G1)):
         ligands.select_atoms(f" index {' '.join(list(map(str, list(nodes)))):}").write(
             "temp.pdb"
@@ -271,14 +276,249 @@ def prepare_initial_topology(
     n_metals = len(np.concatenate(metal_indecies))
     cage_topol.write(output_top, [list(range(n_ligands + n_metals))])
 
-    # n_metals = len(metal_indices)
-
     new_metal_indices = list(range(n_metals))
 
     return new_metal_indices
 
 
-import argparse
+def prepare_stk_initial_topology(
+    molecule: stk.Molecule,
+    metal_names,
+    metal_charge,
+    output_dir,
+    output_coord,
+    output_top,
+    metal_vdw,
+    ligand_topol=None,
+):
+    """
+    Using Antechamber prepares a topology for input structure
+
+    :param filename: (str) filename of the input coordination file
+    :param metal_names: (list(str)) names of metals
+    :param metal_charge: (list(int)) formal charges of the metal
+    :param output_coord: (str) filename of the output coordination file
+    :param output_top: (str) filename of the output force-field file
+    :param metal_vdw: (str) name of dataset used for the metal LJ parameters
+    :param ligand_topol: (str, optional) filename of the force-field parameters of the linker (it will not parametrize
+                                        antechamber) (single ligand only!)
+    :return: (list(int)) indices of the metals in coordination/topology file
+    """
+
+    if not check_antechamber_if_available() and ligand_topol is None:
+        raise ImportError(
+            "Not antechamber detected (preparation of initial topology is done by antechamber)"
+        )
+
+    crystal = MDAnalysis.Universe(molecule.to_rdkit_mol())
+    if not hasattr(crystal.atoms[0], "element"):
+        guessed_elements = MDAnalysis.topology.guessers.guess_types(crystal)
+        crystal.universe.add_TopologyAttr("elements", guessed_elements)
+
+    crystal.residues.resids = 0  # Antechamber requires one residue
+
+    table = MDAnalysis.topology.tables.vdwradii
+    table["Cl"] = table["CL"]
+    metal_ions = None
+
+    if len(metal_names) > 0:
+        if crystal.dimensions is not None:
+            for metal_name in metal_names:
+                crystal = unwrap(crystal, metal_name, metal_cutoff=0.1)
+
+        metal_indecies = []
+        for metal_name in metal_names:
+            indecies, _ = find_metal_indices(crystal, metal_name)
+            metal_indecies.append(indecies)
+
+        metal_ions = crystal.atoms[np.concatenate(metal_indecies)]
+        ligands = crystal.atoms - metal_ions
+
+        G1 = nx.Graph(get_mda_bonds(ligands))
+        nx.set_node_attributes(
+            G1, {atom.index: atom.name[0] for atom in ligands.atoms}, "name"
+        )
+    else:
+        ligands = crystal.atoms
+        G1 = nx.Graph(get_mda_bonds(ligands))
+        nx.set_node_attributes(
+            G1, {atom.index: atom.name[0] for atom in ligands.atoms}, "name"
+        )
+
+    ligand_library = []
+
+    for z, nodes in enumerate(nx.connected_components(G1)):
+        if len(ligand_library) == 0:
+            ligand_library.append(nodes)
+        else:
+            Ga = G1.subgraph(nodes)
+            is_isomorphic = False
+            for ligand_from_library in ligand_library:
+                Gb = G1.subgraph(ligand_from_library)
+
+                iso = isomorphism.GraphMatcher(
+                    Ga, Gb, node_match=lambda n1, n2: n1["name"] == n2["name"]
+                )
+                if iso.is_isomorphic():
+                    is_isomorphic = True
+                    break
+            if not is_isomorphic:
+                ligand_library.append(nodes)
+
+    Gtops = []  # nx graphs
+    topologies = []  # MDAnalysis universes with the positions
+    ligand_tops = []  # parmed topologies
+
+    for idx, nodes in enumerate(ligand_library):
+        ligand_coords_mda = MDAnalysis.Merge(
+            crystal.select_atoms(f" index {' '.join(list(map(str, list(nodes)))):}")
+        )
+
+        is_iso, ligand, topology, Gtop = mapping_itp_coords(
+            ligand_coords_mda, ligand_topol
+        )  # what if there are more then one topologies (?)
+        if not is_iso:  # if not isomorphic we paramterize with antechamber:
+            ligand_coords_mda.atoms.write(output_dir / "temp.pdb")
+
+            antechamber(
+                str(output_dir / "temp.pdb"), str(output_dir / f"linker{idx:}.top")
+            )
+            ligand = pmd.load_file(
+                str(output_dir / f"linker{idx:}.top"), structure=False
+            )
+            print(ligand.symmetry)
+            topology = MDAnalysis.Universe.empty(len(ligand.atoms), trajectory=True)
+            topology.add_TopologyAttr("name")
+            for a in range(len(topology.atoms)):
+                topology.atoms[a].name = ligand.atoms[a].name
+
+            Gtop = nx.Graph([(bond.atom1.idx, bond.atom2.idx) for bond in ligand.bonds])
+            nx.set_node_attributes(
+                Gtop, {atom.idx: atom.name[0] for atom in ligand.atoms}, "name"
+            )
+
+        ligand_tops.append(ligand)
+        topologies.append(topology)
+        Gtops.append(Gtop)
+
+    new_ligands = []
+
+    n_ligands = 0
+
+    # parmed has issues if ligands are merged, but molecules are not grouped togheter
+    ligand_group = {}
+    for z, nodes in enumerate(nx.connected_components(G1)):
+        ligands.select_atoms(f" index {' '.join(list(map(str, list(nodes)))):}").write(
+            output_dir / "temp.pdb"
+        )
+        Gsub = G1.subgraph(nodes)
+
+        for top_idx, Gtop in enumerate(Gtops):
+            new_ligand = topologies[top_idx].copy()
+
+            # Sometimes guesser will not guess right the bonds, decreasing
+            # fudge factor might help...
+            if len(Gsub) == len(Gtop) and len(Gsub.edges()) != len(Gtop.edges()):
+                logger.info(
+                    "The number of atoms agree... but not the number of bonds, probably bonds are not guessed right"
+                )
+                fudge_factor = 0.55
+                while fudge_factor > 0 and len(Gsub.edges()) != len(Gtop.edges()):
+                    Gsub = nx.Graph(
+                        MDAnalysis.topology.guessers.guess_bonds(
+                            crystal.atoms[Gsub.nodes()],
+                            crystal.atoms[Gsub.nodes()].positions,
+                            vdwradii=table,
+                            box=crystal.dimensions,
+                            fudge_factor=fudge_factor,
+                        )
+                    )
+                    nx.set_node_attributes(
+                        Gsub,
+                        {
+                            atom.index: atom.name[0]
+                            for atom in crystal.atoms[Gsub.nodes()]
+                        },
+                        "name",
+                    )
+                    fudge_factor -= 0.01
+                if fudge_factor < 0.45:
+                    raise ValueError("error, cannot guess the bonds")
+
+            iso = isomorphism.GraphMatcher(
+                Gsub, Gtop, node_match=lambda n1, n2: n1["name"] == n2["name"]
+            )
+            if iso.is_isomorphic():
+                for node in list(nodes):
+                    new_ligand.atoms[iso.mapping[node]].position = crystal.atoms[
+                        node
+                    ].position
+                ligand_group[z] = top_idx
+
+                new_ligands.append(new_ligand.atoms)
+                n_ligands += 1
+            else:
+                logger.debug(
+                    "cannot match the ligands. No need to worry if "
+                    "heteroleptic. Otherwise you need to create topology "
+                    "with nonboned metal manually (or you might try to "
+                    "optimize structure"
+                )
+
+    cage_topol = None
+    if metal_ions is not None:
+        for metal_name, indecies in zip(metal_names, metal_indecies):
+            metal = create_metal_topol(metal_name, metal_charge, metal_vdw)
+            n_metals = len(indecies)
+            if cage_topol is None:
+                cage_topol = metal * n_metals
+            else:
+                cage_topol += metal * n_metals
+
+    # we group the ligands togheter
+    order = np.argsort(list(ligand_group.values()))
+
+    # firstly the topology file
+    for idx in order:
+        top_idx = ligand_group[idx]
+
+        if cage_topol is None:
+            cage_topol = deepcopy(ligand_tops[top_idx])
+        else:
+            cage_topol += deepcopy(ligand_tops[top_idx])
+
+    # and then ligands
+    if metal_ions is None:
+        reordered_new_ligands = [new_ligands[idx] for idx in order]
+        # save new renumered (atoms of linkers and order of linkers) cage
+        new_cage = MDAnalysis.Merge(*reordered_new_ligands)
+        new_cage.dimensions = crystal.dimensions
+        new_cage.atoms.write(output_coord)
+        n_metals = 0
+
+        # This is to handle something weird that I do not fully understand
+        # with combining GromacsTopFiles.... but it works for now.
+        if len(ligand_tops) == 1:
+            cage_topol.write(str(output_top), combine="all")
+        else:
+            cage_topol.write(
+                str(output_top), combine=[list(range(n_ligands + n_metals))]
+            )
+        new_metal_indices = []
+
+    else:
+        reordered_new_ligands = [metal_ions] + [new_ligands[idx] for idx in order]
+        # save new renumered (atoms of linkers and order of linkers) cage
+        new_cage = MDAnalysis.Merge(*reordered_new_ligands)
+        new_cage.dimensions = crystal.dimensions
+        new_cage.atoms.write(output_coord)
+
+        n_metals = len(np.concatenate(metal_indecies))
+        cage_topol.write(str(output_top), [list(range(n_ligands + n_metals))])
+
+        new_metal_indices = list(range(n_metals))
+
+    return new_metal_indices
 
 
 def get_args():
